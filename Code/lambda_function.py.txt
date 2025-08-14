@@ -1,0 +1,173 @@
+import os
+import boto3
+import pymysql
+import csv
+import json
+from io import StringIO
+from datetime import datetime
+
+# Environment variables
+SECRET_ARN = os.environ['SECRET_ARN']
+S3_BUCKET = os.environ['S3_BUCKET']
+SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+DB_HOST = os.environ['DB_HOST']
+DB_PORT = int(os.environ.get('DB_PORT', 3306))
+DB_NAME = os.environ.get('DB_NAME', 'sakila')
+S3_PREFIX = os.environ.get('PREFIX', 'sakila-dashboard/')
+
+# AWS clients
+s3 = boto3.client('s3')
+secrets = boto3.client('secretsmanager')
+sns = boto3.client('sns')
+
+# Pre-aggregate queries
+queries = {
+    "total_revenue_by_store_month": """
+        SELECT s.store_id, DATE_FORMAT(p.payment_date, '%Y-%m') AS month, SUM(p.amount) AS total_revenue
+        FROM payment p
+        JOIN staff st ON p.staff_id = st.staff_id
+        JOIN store s ON st.store_id = s.store_id
+        GROUP BY s.store_id, month
+        ORDER BY month, s.store_id;
+    """,
+    "revenue_by_film_category": """
+        SELECT cat.name AS category_name, SUM(p.amount) AS total_revenue
+        FROM payment p
+        JOIN rental r ON p.rental_id = r.rental_id
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        JOIN film_category fc ON f.film_id = fc.film_id
+        JOIN category cat ON fc.category_id = cat.category_id
+        GROUP BY cat.name
+        ORDER BY total_revenue DESC;
+    """,
+    "average_rental_duration_by_category": """
+        SELECT cat.name AS category_name, AVG(DATEDIFF(r.return_date, r.rental_date)) AS avg_rental_days
+        FROM rental r
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        JOIN film_category fc ON f.film_id = fc.film_id
+        JOIN category cat ON fc.category_id = cat.category_id
+        WHERE r.return_date IS NOT NULL
+        GROUP BY cat.name
+        ORDER BY avg_rental_days DESC;
+    """,
+    "store_revenue_by_staff": """
+        SELECT st.store_id, CONCAT(st.first_name, ' ', st.last_name) AS staff_name, SUM(p.amount) AS total_revenue
+        FROM payment p
+        JOIN staff st ON p.staff_id = st.staff_id
+        GROUP BY st.store_id, staff_name
+        ORDER BY total_revenue DESC;
+    """,
+    "category_revenue_share_by_store": """
+        SELECT s.store_id, cat.name AS category_name, SUM(p.amount) AS total_revenue
+        FROM payment p
+        JOIN rental r ON p.rental_id = r.rental_id
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        JOIN film_category fc ON f.film_id = fc.film_id
+        JOIN category cat ON fc.category_id = cat.category_id
+        JOIN staff st ON p.staff_id = st.staff_id
+        JOIN store s ON st.store_id = s.store_id
+        GROUP BY s.store_id, cat.name
+        ORDER BY s.store_id, total_revenue DESC;
+    """,
+    "film_rating_popularity_by_rentals": """
+        SELECT f.rating, COUNT(r.rental_id) AS rental_count
+        FROM rental r
+        JOIN inventory i ON r.inventory_id = i.inventory_id
+        JOIN film f ON i.film_id = f.film_id
+        GROUP BY f.rating
+        ORDER BY rental_count DESC;
+    """,
+    "films_per_actor_top_10": """
+        SELECT a.actor_id, CONCAT(a.first_name, ' ', a.last_name) AS actor_name, COUNT(fa.film_id) AS film_count
+        FROM actor a
+        JOIN film_actor fa ON a.actor_id = fa.actor_id
+        GROUP BY a.actor_id
+        ORDER BY film_count DESC
+        LIMIT 10;
+    """
+}
+
+# Tables to export
+base_tables = [
+    'payment', 'rental', 'customer', 'film', 'category', 'store',
+    'language', 'city', 'country', 'address', 'staff'
+]
+
+def get_db_creds(secret_arn):
+    return json.loads(secrets.get_secret_value(SecretId=secret_arn)['SecretString'])
+
+def run_query(conn, sql):
+    with conn.cursor() as cursor:
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        headers = [desc[0] for desc in cursor.description]
+    return headers, rows
+
+def to_csv(headers, rows):
+    buffer = StringIO()
+    csv.writer(buffer).writerows([headers] + [list(row) for row in rows])
+    return buffer.getvalue()
+
+
+def upload_s3(data, key, content_type='text/csv'):
+    s3.put_object(Body=data.encode('utf-8'), Bucket=S3_BUCKET, Key=key, ContentType=content_type)
+
+def manifest_json(key):
+    return json.dumps({
+        "fileLocations": [{"URIs": [f"s3://{S3_BUCKET}/{key}"]}],
+        "globalUploadSettings": {"format": "CSV", "delimiter": ",", "textqualifier": "\"", "containsHeader": "true"}
+    })
+
+def notify(subject, message):
+    sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject, Message=message)
+
+def process_and_upload(conn, name, sql):
+    headers, rows = run_query(conn, sql)
+    csv_data = to_csv(headers, rows)
+
+    csv_key = f"{S3_PREFIX}datasets/{name}.csv"
+    upload_s3(csv_data, csv_key)
+
+    manifest_key = f"{S3_PREFIX}manifests/{name}_manifest.json"
+    upload_s3(manifest_json(csv_key), manifest_key, content_type='application/json')
+
+    backup_key = f"{S3_PREFIX}backup/{name}_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    upload_s3(csv_data, backup_key)
+
+    return csv_key, backup_key
+
+def lambda_handler(event, context):
+    creds = get_db_creds(SECRET_ARN)
+    conn = pymysql.connect(host=DB_HOST, user=creds['username'], password=creds['password'],
+                           db=DB_NAME, port=DB_PORT, autocommit=True)
+
+    summary = {"uploaded": [], "backups": [], "errors": []}
+
+    try:
+        for name, query in queries.items():
+            try:
+                u, b = process_and_upload(conn, name, query)
+                summary["uploaded"].append(u)
+                summary["backups"].append(b)
+            except Exception as e:
+                summary["errors"].append({name: str(e)})
+
+        for table in base_tables:
+            try:
+                u, b = process_and_upload(conn, table, f"SELECT * FROM {table};")
+                summary["uploaded"].append(u)
+                summary["backups"].append(b)
+            except Exception as e:
+                summary["errors"].append({table: str(e)})
+
+        notify("Lambda: Sakila ETL - Success", json.dumps(summary, indent=2))
+        return {"statusCode": 200, "body": json.dumps(summary)}
+
+    except Exception as e:
+        notify("Lambda: Sakila ETL - Failure", str(e))
+        raise
+    finally:
+        conn.close()
