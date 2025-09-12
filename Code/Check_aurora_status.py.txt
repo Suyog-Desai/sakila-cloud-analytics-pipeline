@@ -1,0 +1,44 @@
+import json
+import os
+import boto3
+
+# Environment Variables
+SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+CLUSTER_ID = os.environ['CLUSTER_ID']
+
+# AWS Clients
+rds = boto3.client('rds')
+sns = boto3.client('sns')
+
+def notify(subject, message):
+    sns.publish(TopicArn=SNS_TOPIC_ARN, Message=message, Subject=subject)
+
+def lambda_handler(event, context):
+    summary = {}
+    try:
+        response = rds.describe_db_clusters(DBClusterIdentifier=CLUSTER_ID)
+        cluster_status = response['DBClusters'][0]['Status']
+        summary['current_status'] = cluster_status
+
+        if cluster_status == "available":
+            rds.stop_db_cluster(DBClusterIdentifier=CLUSTER_ID)
+            summary["action"] = "Cluster was running, stop initiated."
+            notify("Aurora Control - Stop Initiated",
+                   f"Cluster {CLUSTER_ID} was running. Stop command issued.")
+
+        elif cluster_status == "stopped":
+            summary["action"] = "Cluster is already stopped."
+            notify("Aurora Control - Already Stopped",
+                   f"Cluster {CLUSTER_ID} is already stopped.")
+
+        else:
+            summary["action"] = f"No action taken. Current state: {cluster_status}"
+            notify("Aurora Control - No Action",
+                   f"Cluster {CLUSTER_ID} is in state {cluster_status}. No action taken.")
+
+        return {"statusCode": 200, "body": json.dumps(summary)}
+
+    except Exception as e:
+        summary["error"] = str(e)
+        notify("Aurora Control - Failure", str(e))
+        raise
