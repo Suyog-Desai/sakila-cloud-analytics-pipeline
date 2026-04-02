@@ -1,12 +1,12 @@
 # Sakila Cloud Analytics Pipeline
 
-Migrated the Sakila MySQL database from a local environment to AWS Aurora MySQL in a private VPC, then built a fully automated weekly pipeline that extracts data via Lambda, stores it in S3, and serves it as live dashboards in Amazon QuickSight — all without a NAT Gateway.
+Migrated the Sakila MySQL database from a local environment to AWS Aurora MySQL in a private VPC, then built a fully automated weekly pipeline that extracts data via Lambda, stores it in S3, and serves it as live dashboards in Amazon QuickSight and  all without a NAT Gateway.
 
 ---
 
 ## Why This Project
 
-Most cloud tutorials hand you a pre-configured environment. I wanted to build one from scratch — VPC, subnets, routing, bastion hosts, Aurora cluster, IAM roles, Lambda, the whole thing — and wire it into an automated analytics pipeline that actually runs on a schedule. The Sakila database was a convenient vehicle for that.
+Most cloud tutorials hand you a pre-configured environment. I wanted to build one from scratch like from VPC, subnets, routing, bastion hosts, Aurora cluster, IAM roles, Lambda, the whole thing  and wire it into an automated analytics pipeline that actually runs on a schedule. The Sakila database was a convenient vehicle for that.
 
 The other constraint I set for myself: **no NAT Gateway**. NAT Gateways are expensive at scale and a crutch. VPC Endpoints solve the same problem for AWS-internal traffic at a fraction of the cost.
 
@@ -119,7 +119,7 @@ Connected QuickSight to S3 via manifest files and built 4 dashboards: rental tre
 
 ## Security Decisions Worth Highlighting
 
-- Aurora has no public IP — only reachable from Lambda and Bastion security groups
+- Aurora has no public IP that is only reachable from Lambda and Bastion security groups
 - Bastion hosts restricted to my IP via security group inbound rules
 - All DB credentials live in Secrets Manager, never in code or environment variables
 - IAM roles scoped to minimum required permissions per service
