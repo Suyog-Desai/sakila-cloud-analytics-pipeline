@@ -1,4 +1,4 @@
-# Sakila DB Migration & Dashboard Automation
+# Sakila Cloud Analytics Pipeline
 
 Migrated the Sakila MySQL database from a local environment to AWS Aurora MySQL in a private VPC, then built a fully automated weekly pipeline that extracts data via Lambda, stores it in S3, and serves it as live dashboards in Amazon QuickSight — all without a NAT Gateway.
 
@@ -13,6 +13,8 @@ The other constraint I set for myself: **no NAT Gateway**. NAT Gateways are expe
 ---
 
 ## Architecture
+
+![AWS Architecture](Output/AWS%20Architecture.png)
 
 ```
 Local MySQL (Sakila dump)
@@ -40,19 +42,25 @@ Amazon QuickSight Dashboard
    ├── Revenue by store
    └── Inventory by category
 
-EventBridge → triggers Lambda weekly
-CloudWatch Alarm → SNS notification on Lambda failure
-QuickSight dataset refresh → 3 hours after Lambda run
+EventBridge  → triggers Lambda weekly
+CloudWatch   → SNS notification on Lambda failure
+QuickSight   → dataset refresh 3 hours after Lambda run
 ```
 
 ---
 
-## What I Built
+## VPC & Network Structure
 
-**VPC & Networking**
+![VPC Structure](Output/VPC_Stucture.png)
+
 - Custom VPC in us-east-1 with 4 subnets across 2 AZs (2 public, 2 private)
 - Public subnets route through Internet Gateway; private subnets are local-only
 - VPC Endpoints for S3 (Gateway), SNS (Interface), and Secrets Manager (Interface) — no NAT Gateway needed
+- EC2 Bastion Hosts in public subnets for SSH tunneling into Aurora
+
+---
+
+## What I Built
 
 **Database Migration**
 - Exported Sakila dump from local MySQL
@@ -66,15 +74,29 @@ QuickSight dataset refresh → 3 hours after Lambda run
 - Runs multiple SQL queries, saves results as timestamped CSVs to S3
 - Generates manifest files for QuickSight ingestion automatically
 
-**QuickSight Dashboards**
-- Connected QuickSight to S3 via manifest files
-- Built 4 dashboards: rental trends, top movies, store revenue, inventory by category
-- Scheduled dataset refresh 3 hours after Lambda execution
+**S3 Output Structure**
 
-**Scheduling & Monitoring**
-- EventBridge rule triggers Lambda weekly
-- CloudWatch Alarm fires SNS notification if Lambda fails
-- IAM roles follow least-privilege throughout — S3 access on bastion host revoked after migration phase completed
+Dataset folder:
+
+![Dataset Folder](Output/Dataset_folder.png)
+
+Tables folder:
+
+![Tables Folder](Output/Tables_folder.png)
+
+Backup folder:
+
+![Backup Folder](Output/backup_folder.png)
+
+Manifest folder:
+
+![Manifest Folder](Output/maifest_folder.png)
+
+**QuickSight Dashboards**
+
+Connected QuickSight to S3 via manifest files and built 4 dashboards: rental trends, top movies, store revenue, and inventory by category. Dataset refreshes automatically 3 hours after Lambda runs.
+
+📊 [View Full Dashboard (PDF)](Output/Quicksight_Dashboard.pdf)
 
 ---
 
@@ -95,28 +117,13 @@ QuickSight dataset refresh → 3 hours after Lambda run
 
 ---
 
-## Project Structure
-
-```
-sakila-db-migration/
-├── lambda/
-│   └── lambda_function.py        # Lambda handler — queries Aurora, writes to S3
-├── sql/
-│   └── queries.sql               # SQL queries used in the pipeline
-├── docs/
-│   └── Sakila_DB_Migration.docx  # Full implementation guide with issues & fixes
-└── README.md
-```
-
----
-
 ## Security Decisions Worth Highlighting
 
 - Aurora has no public IP — only reachable from Lambda and Bastion security groups
 - Bastion hosts restricted to my IP via security group inbound rules
 - All DB credentials live in Secrets Manager, never in code or environment variables
 - IAM roles scoped to minimum required permissions per service
-- Bastion's S3 access role revoked immediately after the migration phase — principle of least privilege enforced throughout
+- Bastion's S3 access role revoked immediately after the migration phase — least privilege enforced throughout
 
 ---
 
